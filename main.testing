@@ -1,0 +1,19 @@
+package main
+
+import (
+	"fmt"
+)
+
+func main() {
+	api := New("http://172.23.132.16:8081/api/v1", "", "laterooms.io.", "donaudampfschiff")
+
+	resp, err := api.GetRecords()
+	if err != nil {
+		fmt.Printf("%s", err)
+	}
+
+	for _, rec := range resp {
+		fmt.Println(rec)
+	}
+
+}

@@ -6,9 +6,14 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"net/http"
 	"strings"
-
-	"github.com/dghubble/sling"
+	"errors"
+	"bytes"
+	"time"
+	"path"
+	"io/ioutil"
+	"encoding/json"
 )
 
 // Error strct
@@ -31,22 +36,30 @@ type CombinedRecord struct {
 
 // Zone struct
 type Zone struct {
+	
+	
+	Account        string `json:"account"`
+	DNSsec         bool   `json:"dnssec"`
 	ID             string `json:"id"`
-	URL            string `json:"url"`
+	Kind        string `json:"kind"`
+	LastCheck      int    `json:"last_check"`
+//missing masters
 	Name           string `json:"name"`
 	Type           string `json:"type"`
-	DNSsec         bool   `json:"dnssec"`
-	Serial         int    `json:"serial"`
-	NotifiedSerial int    `json:"notified_serial"`
-	LastCheck      int    `json:"last_check"`
+	
+	NotifiedSerial int64    `json:"notified_serial"`
+	
 	Records        []struct {
 		Name     string `json:"name"`
 		Type     string `json:"type"`
 		TTL      int    `json:"ttl"`
-		Priority int    `json:"priority"`
-		Disabled bool   `json:"disabled"`
-		Content  string `json:"content"`
-	} `json:"records"`
+		Records    []Record `json:"records"`
+	} `json:"rrsets"`
+
+	Serial         int64    `json:"serial"`
+	SOAEdit        string `json:"soa_edit"`
+	SOAEditApi     string `json:"soa_edit_api"`
+	URL            string `json:"url"`
 }
 
 // Record struct
@@ -63,6 +76,7 @@ type Record struct {
 type RRset struct {
 	Name       string   `json:"name"`
 	Type       string   `json:"type"`
+	TTL        int      `json:"ttl"`
 	ChangeType string   `json:"changetype"`
 	Records    []Record `json:"records"`
 }
@@ -76,6 +90,7 @@ type RRsets struct {
 type PowerDNS struct {
 	scheme   string
 	hostname string
+	basePath string
 	port     string
 	vhost    string
 	domain   string
@@ -105,9 +120,14 @@ func New(baseURL string, vhost string, domain string, apikey string) *PowerDNS {
 		}
 	}
 
+	if u.Path == "" {
+		u.Path = "/"
+	}
+
 	return &PowerDNS{
 		scheme:   u.Scheme,
 		hostname: hostname,
+		basePath: u.Path,
 		port:     port,
 		vhost:    vhost,
 		domain:   domain,
@@ -116,23 +136,23 @@ func New(baseURL string, vhost string, domain string, apikey string) *PowerDNS {
 }
 
 // AddRecord ...
-func (p *PowerDNS) AddRecord(name string, recordType string, ttl int, content []string) (*Zone, error) {
+func (p *PowerDNS) AddRecord(name string, recordType string, ttl int, content []string) (error) {
 
-	zone, err := p.ChangeRecord(name, recordType, ttl, content, "UPSERT")
+	err := p.ChangeRecord(name, recordType, ttl, content, "UPSERT")
 
-	return zone, err
+	return err
 }
 
 // DeleteRecord ...
-func (p *PowerDNS) DeleteRecord(name string, recordType string, ttl int, content []string) (*Zone, error) {
+func (p *PowerDNS) DeleteRecord(name string, recordType string, ttl int, content []string) (error) {
 
-	zone, err := p.ChangeRecord(name, recordType, ttl, content, "DELETE")
+	err := p.ChangeRecord(name, recordType, ttl, content, "DELETE")
 
-	return zone, err
+	return err
 }
 
 // ChangeRecord ...
-func (p *PowerDNS) ChangeRecord(name string, recordType string, ttl int, content []string, action string) (*Zone, error) {
+func (p *PowerDNS) ChangeRecord(name string, recordType string, ttl int, content []string, action string) (error) {
 
 	Record := new(CombinedRecord)
 	Record.Name = name
@@ -140,18 +160,21 @@ func (p *PowerDNS) ChangeRecord(name string, recordType string, ttl int, content
 	Record.TTL = ttl
 	Record.Records = content
 
-	zone, err := p.patchRRset(*Record, action)
+	err := p.patchRRset(*Record, action)
 
-	return zone, err
+	return err
 }
 
-func (p *PowerDNS) patchRRset(record CombinedRecord, action string) (*Zone, error) {
-
-	if strings.HasSuffix(record.Name, ".") {
-		record.Name = strings.TrimSuffix(record.Name, ".")
+func fqdn(name string) string {
+	n := len(name)
+	if n == 0 || name[n-1] == '.' {
+		return name
 	}
+	return name + "."
+}
 
-	Set := RRset{Name: record.Name, Type: record.Type, ChangeType: "REPLACE"}
+func (p *PowerDNS) patchRRset(record CombinedRecord, action string) (error) {
+	Set := RRset{Name: fqdn(record.Name), Type: record.Type, ChangeType: "REPLACE", TTL: record.TTL}
 
 	if action == "DELETE" {
 		Set.ChangeType = "DELETE"
@@ -164,34 +187,62 @@ func (p *PowerDNS) patchRRset(record CombinedRecord, action string) (*Zone, erro
 		Set.Records = append(Set.Records, R)
 	}
 
-	json := RRsets{}
-	json.Sets = append(json.Sets, Set)
+	dataObject := RRsets{}
+	dataObject.Sets = append(dataObject.Sets, Set)
 
-	error := new(Error)
-	zone := new(Zone)
+	data, _ := json.Marshal(dataObject)
 
-	resp, err := p.getSling().Patch(p.domain).BodyJSON(json).Receive(zone, error)
+	_, err := p.request("PATCH", p.getUrl(), data)
 
-	if err == nil && resp.StatusCode >= 400 {
-		error.Message = strings.Join([]string{resp.Status, error.Message}, " ")
-		return nil, error
+	if err != nil {
+		return fmt.Errorf("PowerDNS API call has failed: %v", err)
 	}
 
-	return zone, err
+	return err
 }
 
-func (p *PowerDNS) getSling() *sling.Sling {
+func (p *PowerDNS) getUrl() string {
 
 	u := new(url.URL)
 	u.Host = p.hostname + ":" + p.port
 	u.Scheme = p.scheme
-	u.Path = "/servers/" + p.vhost + "/zones/"
 
-	Sling := sling.New().Base(u.String())
+	childPath := "/servers/" + p.vhost + "/zones/" + fqdn(p.domain)
 
-	Sling.Set("X-API-Key", p.apikey)
+	u.Path = path.Join(p.basePath, childPath)
 
-	return Sling
+	return u.String()
+}
+
+
+
+func (p *PowerDNS) request(method string, url string, b []byte) (response []byte, err error) {
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(b))
+
+	req.Header.Set("X-API-Key", p.apikey)
+	req.Header.Set("content-type", "application/json; charset=utf-8")
+	req.Header.Set("accept", "application/json; charset=utf-8")
+	req.Header.Set("user-agent", "PowerDNS-Integration Plugin")
+
+	httpClient := &http.Client{Timeout: (120 * time.Second)}
+
+	res, err := httpClient.Do(req)
+
+	if err != nil {
+		err = errors.New("Http request returned an error")
+		return
+	}
+
+	defer res.Body.Close()
+
+	response, err = ioutil.ReadAll(res.Body)
+
+	if err != nil {
+		err = errors.New("Error while reading body")
+		return
+	}
+
+	return
 }
 
 // GetRecords ...
@@ -200,26 +251,21 @@ func (p *PowerDNS) GetRecords() ([]Record, error) {
 	var records []Record
 
 	zone := new(Zone)
-	error := new(Error)
 
-	u := new(url.URL)
-	u.Host = p.hostname + ":" + p.port
-	u.Scheme = p.scheme
-	u.Path = "/servers/" + p.vhost + "/zones/"
-
-	resp, err := p.getSling().Path(p.domain).Set("X-API-Key", p.apikey).Receive(zone, error)
+	data, err := p.request("GET", p.getUrl(), nil)
 
 	if err != nil {
 		return records, fmt.Errorf("PowerDNS API call has failed: %v", err)
 	}
 
-	if resp.StatusCode >= 400 {
-		error.Message = strings.Join([]string{resp.Status, error.Message}, " ")
-		return records, error
-	}
+	err = json.Unmarshal(data, &zone)
 
+	if err != nil {
+		return records, fmt.Errorf("PowerDNS API call has failed: %v", err)
+	}
+	
 	for _, rec := range zone.Records {
-		record := Record{Name: rec.Name, Type: rec.Type, TTL: rec.TTL, Priority: rec.Priority, Disabled: rec.Disabled, Content: rec.Content}
+		record := Record{Name: rec.Name, Type: rec.Type, TTL: rec.TTL, Priority: rec.Records[0].Priority, Disabled: rec.Records[0].Disabled, Content: rec.Records[0].Content}
 		records = append(records, record)
 	}
 
