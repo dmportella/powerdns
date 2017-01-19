@@ -1,319 +1,399 @@
-package powerdns
+package PowerDNS
 
-//Based off of github.com/waynz0r/powerdns
+// Covered by original license.
 
 import (
-	"fmt"
-	"log"
-	"net/url"
-	"net/http"
-	"strings"
-	"errors"
 	"bytes"
-	"time"
-	"path"
-	"io/ioutil"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/hashicorp/go-cleanhttp"
 )
 
-// Error strct
-type Error struct {
-	Message string `json:"error"`
+type Client struct {
+	ServerUrl  string // Location of PowerDNS server to use
+	ApiKey     string // REST API Static authentication key
+	ApiVersion int    // API version to use
+	Http       *http.Client
 }
 
-// Error Returns
-func (e Error) Error() string {
-	return fmt.Sprintf("%v", e.Message)
+// NewClient returns a new PowerDNS client
+func NewClient(serverUrl string, apiKey string) (*Client, error) {
+	client := Client{
+		ServerUrl: serverUrl,
+		ApiKey:    apiKey,
+		Http:      cleanhttp.DefaultClient(),
+	}
+	var err error
+	client.ApiVersion, err = client.detectApiVersion()
+	if err != nil {
+		return nil, err
+	}
+	return &client, nil
 }
 
-// CombinedRecord strct
-type CombinedRecord struct {
-	Name    string
-	Type    string
-	TTL     int
-	Records []string
+// Creates a new request with necessary headers
+func (c *Client) newRequest(method string, endpoint string, body []byte) (*http.Request, error) {
+
+	var urlStr string
+	if c.ApiVersion > 0 {
+		urlStr = c.ServerUrl + "/api/v" + strconv.Itoa(c.ApiVersion) + endpoint
+	} else {
+		urlStr = c.ServerUrl + endpoint
+	}
+	url, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("Error during parsing request URL: %s", err)
+	}
+
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequest(method, url.String(), bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("Error during creation of request: %s", err)
+	}
+
+	req.Header.Add("X-API-Key", c.ApiKey)
+	req.Header.Add("Accept", "application/json")
+
+	if method != "GET" {
+		req.Header.Add("Content-Type", "application/json")
+	}
+
+	return req, nil
 }
 
-// Zone struct
-type Zone struct {
-	
-	
-	Account        string `json:"account"`
-	DNSsec         bool   `json:"dnssec"`
-	ID             string `json:"id"`
-	Kind        string `json:"kind"`
-	LastCheck      int    `json:"last_check"`
-//missing masters
-	Name           string `json:"name"`
-	Type           string `json:"type"`
-	
-	NotifiedSerial int64    `json:"notified_serial"`
-	
-	Records        []struct {
-		Name     string `json:"name"`
-		Type     string `json:"type"`
-		TTL      int    `json:"ttl"`
-		Records    []Record `json:"records"`
-	} `json:"rrsets"`
-
-	Serial         int64    `json:"serial"`
-	SOAEdit        string `json:"soa_edit"`
-	SOAEditApi     string `json:"soa_edit_api"`
-	URL            string `json:"url"`
+type ZoneInfo struct {
+	Id                 string              `json:"id"`
+	Name               string              `json:"name"`
+	Account            string              `json:"account"`
+	URL                string              `json:"url"`
+	LastCheck          int64               `json:"last_check"`
+	Kind               string              `json:"kind"`
+	DnsSec             bool                `json:"dnsssec"`
+	Serial             int64               `json:"serial"`
+	NotifiedSerial     int64               `json:"notified_serial"`
+	Masters            []string            `json:"masters"`
+	Records            []Record            `json:"records,omitempty"`
+	ResourceRecordSets []ResourceRecordSet `json:"rrsets,omitempty"`
 }
 
-// Record struct
 type Record struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
-	TTL      int    `json:"ttl"`
-	Priority int    `json:"priority"`
-	Disabled bool   `json:"disabled"`
 	Content  string `json:"content"`
+	TTL      int    `json:"ttl"` // For API v0
+	Disabled bool   `json:"disabled"`
 }
 
-// RRset struct
-type RRset struct {
+type ResourceRecordSet struct {
 	Name       string   `json:"name"`
 	Type       string   `json:"type"`
-	TTL        int      `json:"ttl"`
 	ChangeType string   `json:"changetype"`
-	Records    []Record `json:"records"`
+	TTL        int      `json:"ttl"` // For API v1
+	Records    []Record `json:"records,omitempty"`
 }
 
-// RRsets struct
-type RRsets struct {
-	Sets []RRset `json:"rrsets"`
+type zonePatchRequest struct {
+	RecordSets []ResourceRecordSet `json:"rrsets"`
 }
 
-// PowerDNS struct
-type PowerDNS struct {
-	scheme   string
-	hostname string
-	basePath string
-	port     string
-	vhost    string
-	domain   string
-	apikey   string
+type errorResponse struct {
+	ErrorMsg string `json:"error"`
 }
 
-// New returns a new PowerDNS
-func New(baseURL string, vhost string, domain string, apikey string) *PowerDNS {
-	if vhost == "" {
-		vhost = "localhost"
-	}
+const idSeparator string = ":::"
 
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		log.Fatalf("%s is not a valid url: %v", baseURL, err)
-	}
-	hp := strings.Split(u.Host, ":")
-	hostname := hp[0]
-	var port string
-	if len(hp) > 1 {
-		port = hp[1]
+func (record *Record) Id() string {
+	return record.Name + idSeparator + record.Type
+}
+
+func (rrSet *ResourceRecordSet) Id() string {
+	return rrSet.Name + idSeparator + rrSet.Type
+}
+
+// Returns name and type of record or record set based on it's ID
+func parseId(recId string) (string, string, error) {
+	s := strings.Split(recId, idSeparator)
+	if len(s) == 2 {
+		return s[0], s[1], nil
 	} else {
-		if u.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
+		return "", "", fmt.Errorf("Unknown record ID format")
+	}
+}
+
+// Detects the API version in use on the server
+// Uses int to represent the API version: 0 is the legacy AKA version 3.4 API
+// Any other integer correlates with the same API version
+func (client *Client) detectApiVersion() (int, error) {
+	req, err := client.newRequest("GET", "/api/v1/servers", nil)
+	if err != nil {
+		return -1, err
+	}
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return -1, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		return 1, nil
+	} else {
+		return 0, nil
+	}
+}
+
+// Returns all Zones of server, without records
+func (client *Client) ListZones() ([]ZoneInfo, error) {
+
+	req, err := client.newRequest("GET", "/servers/localhost/zones", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var zoneInfos []ZoneInfo
+
+	err = json.NewDecoder(resp.Body).Decode(&zoneInfos)
+	if err != nil {
+		return nil, err
+	}
+
+	return zoneInfos, nil
+}
+
+// Returns all records in Zone
+func (client *Client) ListRecords(zone string) ([]Record, error) {
+	req, err := client.newRequest("GET", fmt.Sprintf("/servers/localhost/zones/%s", zone), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	zoneInfo := new(ZoneInfo)
+	err = json.NewDecoder(resp.Body).Decode(zoneInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	records := zoneInfo.Records
+	// Convert the API v1 response to v0 record structure
+	for _, rrs := range zoneInfo.ResourceRecordSets {
+		for _, record := range rrs.Records {
+			records = append(records, Record{
+				Name:    rrs.Name,
+				Type:    rrs.Type,
+				Content: record.Content,
+				TTL:     rrs.TTL,
+			})
 		}
-	}
-
-	if u.Path == "" {
-		u.Path = "/"
-	}
-
-	return &PowerDNS{
-		scheme:   u.Scheme,
-		hostname: hostname,
-		basePath: u.Path,
-		port:     port,
-		vhost:    vhost,
-		domain:   domain,
-		apikey:   apikey,
-	}
-}
-
-// AddRecord ...
-func (p *PowerDNS) AddRecord(name string, recordType string, ttl int, content []string) (error) {
-
-	err := p.ChangeRecord(name, recordType, ttl, content, "UPSERT")
-
-	return err
-}
-
-// DeleteRecord ...
-func (p *PowerDNS) DeleteRecord(name string, recordType string, ttl int, content []string) (error) {
-
-	err := p.ChangeRecord(name, recordType, ttl, content, "DELETE")
-
-	return err
-}
-
-// ChangeRecord ...
-func (p *PowerDNS) ChangeRecord(name string, recordType string, ttl int, content []string, action string) (error) {
-
-	Record := new(CombinedRecord)
-	Record.Name = name
-	Record.Type = recordType
-	Record.TTL = ttl
-	Record.Records = content
-
-	err := p.patchRRset(*Record, action)
-
-	return err
-}
-
-func fqdn(name string) string {
-	n := len(name)
-	if n == 0 || name[n-1] == '.' {
-		return name
-	}
-	return name + "."
-}
-
-func (p *PowerDNS) patchRRset(record CombinedRecord, action string) (error) {
-	Set := RRset{Name: fqdn(record.Name), Type: record.Type, ChangeType: "REPLACE", TTL: record.TTL}
-
-	if action == "DELETE" {
-		Set.ChangeType = "DELETE"
-	}
-
-	var R Record
-
-	for _, rec := range record.Records {
-		R = Record{Name: record.Name, Type: record.Type, TTL: record.TTL, Content: rec}
-		Set.Records = append(Set.Records, R)
-	}
-
-	dataObject := RRsets{}
-	dataObject.Sets = append(dataObject.Sets, Set)
-
-	data, _ := json.Marshal(dataObject)
-
-	_, err := p.request("PATCH", p.getUrl(), data)
-
-	if err != nil {
-		return fmt.Errorf("PowerDNS API call has failed: %v", err)
-	}
-
-	return err
-}
-
-func (p *PowerDNS) getUrl() string {
-
-	u := new(url.URL)
-	u.Host = p.hostname + ":" + p.port
-	u.Scheme = p.scheme
-
-	childPath := "/servers/" + p.vhost + "/zones/" + fqdn(p.domain)
-
-	u.Path = path.Join(p.basePath, childPath)
-
-	return u.String()
-}
-
-
-
-func (p *PowerDNS) request(method string, url string, b []byte) (response []byte, err error) {
-	req, err := http.NewRequest(method, url, bytes.NewBuffer(b))
-
-	req.Header.Set("X-API-Key", p.apikey)
-	req.Header.Set("content-type", "application/json; charset=utf-8")
-	req.Header.Set("accept", "application/json; charset=utf-8")
-	req.Header.Set("user-agent", "PowerDNS-Integration Plugin")
-
-	httpClient := &http.Client{Timeout: (120 * time.Second)}
-
-	res, err := httpClient.Do(req)
-
-	if err != nil {
-		err = errors.New("Http request returned an error")
-		return
-	}
-
-	defer res.Body.Close()
-
-	response, err = ioutil.ReadAll(res.Body)
-
-	if err != nil {
-		err = errors.New("Error while reading body")
-		return
-	}
-
-	return
-}
-
-// GetRecords ...
-func (p *PowerDNS) GetRecords() ([]Record, error) {
-
-	var records []Record
-
-	zone := new(Zone)
-
-	data, err := p.request("GET", p.getUrl(), nil)
-
-	if err != nil {
-		return records, fmt.Errorf("PowerDNS API call has failed: %v", err)
-	}
-
-	err = json.Unmarshal(data, &zone)
-
-	if err != nil {
-		return records, fmt.Errorf("PowerDNS API call has failed: %v", err)
-	}
-	
-	for _, rec := range zone.Records {
-		record := Record{Name: rec.Name, Type: rec.Type, TTL: rec.TTL, Priority: rec.Records[0].Priority, Disabled: rec.Records[0].Disabled, Content: rec.Records[0].Content}
-		records = append(records, record)
-	}
-
-	return records, err
-}
-
-// GetCombinedRecords ...
-func (p *PowerDNS) GetCombinedRecords() ([]CombinedRecord, error) {
-	var records []CombinedRecord
-	var uniqueRecords []CombinedRecord
-
-	//- Plain records from the zone
-	Records, err := p.GetRecords()
-
-	if err != nil {
-		return records, err
-	}
-
-	//- Iterate through records to combine them by name and type
-	for _, rec := range Records {
-		record := CombinedRecord{Name: rec.Name, Type: rec.Type, TTL: rec.TTL}
-		found := false
-		for _, uRec := range uniqueRecords {
-			if uRec.Name == rec.Name && uRec.Type == rec.Type {
-				found = true
-				continue
-			}
-		}
-
-		//- append them only if missing
-		if found == false {
-			uniqueRecords = append(uniqueRecords, record)
-		}
-	}
-
-	//- Get all values from the unique records
-	for _, uRec := range uniqueRecords {
-		for _, rec := range Records {
-			if uRec.Name == rec.Name && uRec.Type == rec.Type {
-				uRec.Records = append(uRec.Records, rec.Content)
-			}
-		}
-		records = append(records, uRec)
 	}
 
 	return records, nil
 }
 
-func init() {
+// Returns only records of specified name and type
+func (client *Client) ListRecordsAsRRSet(zone string) ([]ResourceRecordSet, error) {
+	req, err := client.newRequest("GET", fmt.Sprintf("/servers/localhost/zones/%s", zone), nil)
+	if err != nil {
+		return nil, err
+	}
 
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	zoneInfo := new(ZoneInfo)
+	err = json.NewDecoder(resp.Body).Decode(zoneInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	if zoneInfo.ResourceRecordSets == nil && len(zoneInfo.ResourceRecordSets) == 0 {
+		return nil, nil
+	}
+
+	return zoneInfo.ResourceRecordSets, nil
+}
+
+// Returns only records of specified name and type
+func (client *Client) ListRecordsByNameAndType(zone string, name string, tpe string) ([]Record, error) {
+	allRecords, err := client.ListRecords(zone)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]Record, 0, 10)
+	for _, r := range allRecords {
+		if r.Name == name && r.Type == tpe {
+			records = append(records, r)
+		}
+	}
+
+	return records, nil
+}
+
+func (client *Client) ListRecordsByID(zone string, recId string) ([]Record, error) {
+	name, tpe, err := parseId(recId)
+	if err != nil {
+		return nil, err
+	} else {
+		return client.ListRecordsByNameAndType(zone, name, tpe)
+	}
+}
+
+// Checks if requested record exists in Zone
+func (client *Client) RecordExists(zone string, name string, tpe string) (bool, error) {
+	allRecords, err := client.ListRecords(zone)
+	if err != nil {
+		return false, err
+	}
+
+	for _, record := range allRecords {
+		if record.Name == name && record.Type == tpe {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Checks if requested record exists in Zone by it's ID
+func (client *Client) RecordExistsByID(zone string, recId string) (bool, error) {
+	name, tpe, err := parseId(recId)
+	if err != nil {
+		return false, err
+	} else {
+		return client.RecordExists(zone, name, tpe)
+	}
+}
+
+// Creates new record with single content entry
+func (client *Client) CreateRecord(zone string, record Record) (string, error) {
+	reqBody, _ := json.Marshal(zonePatchRequest{
+		RecordSets: []ResourceRecordSet{
+			{
+				Name:       record.Name,
+				Type:       record.Type,
+				ChangeType: "REPLACE",
+				Records:    []Record{record},
+			},
+		},
+	})
+
+	req, err := client.newRequest("PATCH", fmt.Sprintf("/servers/localhost/zones/%s", zone), reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		errorResp := new(errorResponse)
+		if err = json.NewDecoder(resp.Body).Decode(errorResp); err != nil {
+			return "", fmt.Errorf("Error creating record: %s", record.Id())
+		} else {
+			return "", fmt.Errorf("Error creating record: %s, reason: %q", record.Id(), errorResp.ErrorMsg)
+		}
+	} else {
+		return record.Id(), nil
+	}
+}
+
+// Creates new record set in Zone
+func (client *Client) ReplaceRecordSet(zone string, rrSet ResourceRecordSet) (string, error) {
+	rrSet.ChangeType = "REPLACE"
+
+	reqBody, _ := json.Marshal(zonePatchRequest{
+		RecordSets: []ResourceRecordSet{rrSet},
+	})
+
+	req, err := client.newRequest("PATCH", fmt.Sprintf("/servers/localhost/zones/%s", zone), reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		errorResp := new(errorResponse)
+		if err = json.NewDecoder(resp.Body).Decode(errorResp); err != nil {
+			return "", fmt.Errorf("Error creating record set: %s", rrSet.Id())
+		} else {
+			return "", fmt.Errorf("Error creating record set: %s, reason: %q", rrSet.Id(), errorResp.ErrorMsg)
+		}
+	} else {
+		return rrSet.Id(), nil
+	}
+}
+
+// Deletes record set from Zone
+func (client *Client) DeleteRecordSet(zone string, name string, tpe string) error {
+	reqBody, _ := json.Marshal(zonePatchRequest{
+		RecordSets: []ResourceRecordSet{
+			{
+				Name:       name,
+				Type:       tpe,
+				ChangeType: "DELETE",
+			},
+		},
+	})
+
+	req, err := client.newRequest("PATCH", fmt.Sprintf("/servers/localhost/zones/%s", zone), reqBody)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		errorResp := new(errorResponse)
+		if err = json.NewDecoder(resp.Body).Decode(errorResp); err != nil {
+			return fmt.Errorf("Error deleting record: %s %s", name, tpe)
+		} else {
+			return fmt.Errorf("Error deleting record: %s %s, reason: %q", name, tpe, errorResp.ErrorMsg)
+		}
+	} else {
+		return nil
+	}
+}
+
+// Deletes record from Zone by it's ID
+func (client *Client) DeleteRecordSetByID(zone string, recId string) error {
+	name, tpe, err := parseId(recId)
+	if err != nil {
+		return err
+	} else {
+		return client.DeleteRecordSet(zone, name, tpe)
+	}
 }
