@@ -7,6 +7,8 @@ import (
 func main() {
 	api, _ := NewClient("http://10.44.17.104:8100/api/v1", "changeme")
 
+	fmt.Println(api.ApiVersion)
+
 	resp, err := api.ListRecordsAsRRSet("dmportella.io.")
 	if err != nil {
 		fmt.Printf("%s", err)

@@ -1,6 +1,6 @@
 # powerdns
-Go PowerDNS 4.0 API Client
+Go PowerDNS 4.0 and 3.4 API Client
 
-Originaly forked from github.com/jgreat/powerdns which was forked from github.com/waynz0r/powerdns
+working api fork from terraform.io
 
-
+added support for more things now

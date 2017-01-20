@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"path"
 
 	"github.com/hashicorp/go-cleanhttp"
 )
@@ -24,12 +25,19 @@ type Client struct {
 
 // NewClient returns a new PowerDNS client
 func NewClient(serverUrl string, apiKey string) (*Client, error) {
+	url, err := url.Parse(serverUrl)
+
+	if err != nil {
+		return nil, err
+	}
+
+	url.Path = ""
+
 	client := Client{
-		ServerUrl: serverUrl,
+		ServerUrl: url.String(),
 		ApiKey:    apiKey,
 		Http:      cleanhttp.DefaultClient(),
 	}
-	var err error
 	client.ApiVersion, err = client.detectApiVersion()
 	if err != nil {
 		return nil, err
@@ -37,18 +45,36 @@ func NewClient(serverUrl string, apiKey string) (*Client, error) {
 	return &client, nil
 }
 
+// Detects the API version in use on the server
+// Uses int to represent the API version: 0 is the legacy AKA version 3.4 API
+// Any other integer correlates with the same API version
+func (client *Client) detectApiVersion() (int, error) {
+
+
+	req, err := client.newRequest("GET", "/api/v1/servers", nil)
+	if err != nil {
+		return -1, err
+	}
+	resp, err := client.Http.Do(req)
+	if err != nil {
+		return -1, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 200 {
+		return 1, nil
+	} else {
+		return 0, nil
+	}
+}
+
 // Creates a new request with necessary headers
 func (c *Client) newRequest(method string, endpoint string, body []byte) (*http.Request, error) {
+	url, err := url.Parse(c.ServerUrl)
 
-	var urlStr string
 	if c.ApiVersion > 0 {
-		urlStr = c.ServerUrl + "/api/v" + strconv.Itoa(c.ApiVersion) + endpoint
+		url.Path = path.Join("/api/v" + strconv.Itoa(c.ApiVersion), endpoint)
 	} else {
-		urlStr = c.ServerUrl + endpoint
-	}
-	url, err := url.Parse(urlStr)
-	if err != nil {
-		return nil, fmt.Errorf("Error during parsing request URL: %s", err)
+		url.Path = path.Join(url.Path, endpoint)
 	}
 
 	var bodyReader io.Reader
@@ -127,26 +153,6 @@ func parseId(recId string) (string, string, error) {
 		return s[0], s[1], nil
 	} else {
 		return "", "", fmt.Errorf("Unknown record ID format")
-	}
-}
-
-// Detects the API version in use on the server
-// Uses int to represent the API version: 0 is the legacy AKA version 3.4 API
-// Any other integer correlates with the same API version
-func (client *Client) detectApiVersion() (int, error) {
-	req, err := client.newRequest("GET", "/api/v1/servers", nil)
-	if err != nil {
-		return -1, err
-	}
-	resp, err := client.Http.Do(req)
-	if err != nil {
-		return -1, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == 200 {
-		return 1, nil
-	} else {
-		return 0, nil
 	}
 }
 
