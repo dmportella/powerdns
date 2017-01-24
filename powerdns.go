@@ -9,23 +9,24 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
-	"path"
 
 	"github.com/hashicorp/go-cleanhttp"
 )
 
+// Client Powerdns API client.
 type Client struct {
-	ServerUrl  string // Location of PowerDNS server to use
-	ApiKey     string // REST API Static authentication key
-	ApiVersion int    // API version to use
-	Http       *http.Client
+	serverURL  string
+	apiKey     string
+	apiVersion int
+	http       *http.Client
 }
 
 // NewClient returns a new PowerDNS client
-func NewClient(serverUrl string, apiKey string) (*Client, error) {
-	url, err := url.Parse(serverUrl)
+func NewClient(serverURL string, apiKey string) (*Client, error) {
+	url, err := url.Parse(serverURL)
 
 	if err != nil {
 		return nil, err
@@ -34,11 +35,11 @@ func NewClient(serverUrl string, apiKey string) (*Client, error) {
 	url.Path = ""
 
 	client := Client{
-		ServerUrl: url.String(),
-		ApiKey:    apiKey,
+		serverURL: url.String(),
+		apiKey:    apiKey,
 		Http:      cleanhttp.DefaultClient(),
 	}
-	client.ApiVersion, err = client.detectApiVersion()
+	client.apiVersion, err = client.detectapiVersion()
 	if err != nil {
 		return nil, err
 	}
@@ -48,31 +49,35 @@ func NewClient(serverUrl string, apiKey string) (*Client, error) {
 // Detects the API version in use on the server
 // Uses int to represent the API version: 0 is the legacy AKA version 3.4 API
 // Any other integer correlates with the same API version
-func (client *Client) detectApiVersion() (int, error) {
-
+func (client *Client) detectapiVersion() (int, error) {
 
 	req, err := client.newRequest("GET", "/api/v1/servers", nil)
+
 	if err != nil {
 		return -1, err
 	}
-	resp, err := client.Http.Do(req)
+
+	resp, err := client.http.Do(req)
+
 	if err != nil {
 		return -1, err
 	}
+
 	defer resp.Body.Close()
+
 	if resp.StatusCode == 200 {
 		return 1, nil
-	} else {
-		return 0, nil
 	}
+
+	return 0, nil
 }
 
 // Creates a new request with necessary headers
-func (c *Client) newRequest(method string, endpoint string, body []byte) (*http.Request, error) {
-	url, err := url.Parse(c.ServerUrl)
+func (client *Client) newRequest(method string, endpoint string, body []byte) (*http.Request, error) {
+	url, err := url.Parse(client.serverURL)
 
-	if c.ApiVersion > 0 {
-		url.Path = path.Join("/api/v" + strconv.Itoa(c.ApiVersion), endpoint)
+	if client.apiVersion > 0 {
+		url.Path = path.Join("/api/v"+strconv.Itoa(client.apiVersion), endpoint)
 	} else {
 		url.Path = path.Join(url.Path, endpoint)
 	}
@@ -87,7 +92,7 @@ func (c *Client) newRequest(method string, endpoint string, body []byte) (*http.
 		return nil, fmt.Errorf("Error during creation of request: %s", err)
 	}
 
-	req.Header.Add("X-API-Key", c.ApiKey)
+	req.Header.Add("X-API-Key", client.apiKey)
 	req.Header.Add("Accept", "application/json")
 
 	if method != "GET" {
@@ -97,14 +102,15 @@ func (c *Client) newRequest(method string, endpoint string, body []byte) (*http.
 	return req, nil
 }
 
+// ZoneInfo Data representing Zone Information.
 type ZoneInfo struct {
-	Id                 string              `json:"id"`
+	ID                 string              `json:"ID"`
 	Name               string              `json:"name"`
 	Account            string              `json:"account"`
 	URL                string              `json:"url"`
 	LastCheck          int64               `json:"last_check"`
 	Kind               string              `json:"kind"`
-	DnsSec             bool                `json:"dnsssec"`
+	DNSSec             bool                `json:"dnsssec"`
 	Serial             int64               `json:"serial"`
 	NotifiedSerial     int64               `json:"notified_serial"`
 	Masters            []string            `json:"masters"`
@@ -112,6 +118,7 @@ type ZoneInfo struct {
 	ResourceRecordSets []ResourceRecordSet `json:"rrsets,omitempty"`
 }
 
+// Record Data representing Record Information.
 type Record struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
@@ -120,6 +127,7 @@ type Record struct {
 	Disabled bool   `json:"disabled"`
 }
 
+// ResourceRecordSet Data representing Resource Record Set Information.
 type ResourceRecordSet struct {
 	Name       string   `json:"name"`
 	Type       string   `json:"type"`
@@ -136,27 +144,31 @@ type errorResponse struct {
 	ErrorMsg string `json:"error"`
 }
 
-const idSeparator string = ":::"
+// IDSeparator separator for record identifier.
+const IDSeparator string = ":::"
 
-func (record *Record) Id() string {
-	return record.Name + idSeparator + record.Type
+// ID Returns the record identifier.
+func (record *Record) ID() string {
+	return record.Name + IDSeparator + record.Type
 }
 
-func (rrSet *ResourceRecordSet) Id() string {
-	return rrSet.Name + idSeparator + rrSet.Type
+// ID Returns the resource record identifier.
+func (rrSet *ResourceRecordSet) ID() string {
+	return rrSet.Name + IDSeparator + rrSet.Type
 }
 
 // Returns name and type of record or record set based on it's ID
-func parseId(recId string) (string, string, error) {
-	s := strings.Split(recId, idSeparator)
+func parseID(recID string) (string, string, error) {
+	s := strings.Split(recID, IDSeparator)
+
 	if len(s) == 2 {
 		return s[0], s[1], nil
-	} else {
-		return "", "", fmt.Errorf("Unknown record ID format")
 	}
+
+	return "", "", fmt.Errorf("Unknown record ID format")
 }
 
-// Returns all Zones of server, without records
+// ListZones Returns all Zones of server, without records
 func (client *Client) ListZones() ([]ZoneInfo, error) {
 
 	req, err := client.newRequest("GET", "/servers/localhost/zones", nil)
@@ -164,7 +176,7 @@ func (client *Client) ListZones() ([]ZoneInfo, error) {
 		return nil, err
 	}
 
-	resp, err := client.Http.Do(req)
+	resp, err := client.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -180,14 +192,14 @@ func (client *Client) ListZones() ([]ZoneInfo, error) {
 	return zoneInfos, nil
 }
 
-// Returns all records in Zone
+// ListRecords Returns all records in Zone
 func (client *Client) ListRecords(zone string) ([]Record, error) {
 	req, err := client.newRequest("GET", fmt.Sprintf("/servers/localhost/zones/%s", zone), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := client.Http.Do(req)
+	resp, err := client.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -215,14 +227,14 @@ func (client *Client) ListRecords(zone string) ([]Record, error) {
 	return records, nil
 }
 
-// Returns only records of specified name and type
+// ListRecordsAsRRSet Returns only records of specified name and type
 func (client *Client) ListRecordsAsRRSet(zone string) ([]ResourceRecordSet, error) {
 	req, err := client.newRequest("GET", fmt.Sprintf("/servers/localhost/zones/%s", zone), nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := client.Http.Do(req)
+	resp, err := client.http.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +253,7 @@ func (client *Client) ListRecordsAsRRSet(zone string) ([]ResourceRecordSet, erro
 	return zoneInfo.ResourceRecordSets, nil
 }
 
-// Returns only records of specified name and type
+// ListRecordsByNameAndType Returns only records of specified name and type
 func (client *Client) ListRecordsByNameAndType(zone string, name string, tpe string) ([]Record, error) {
 	allRecords, err := client.ListRecords(zone)
 	if err != nil {
@@ -258,16 +270,18 @@ func (client *Client) ListRecordsByNameAndType(zone string, name string, tpe str
 	return records, nil
 }
 
-func (client *Client) ListRecordsByID(zone string, recId string) ([]Record, error) {
-	name, tpe, err := parseId(recId)
+// ListRecordsByID returns only records that match the specified record IDentifier.
+func (client *Client) ListRecordsByID(zone string, recID string) ([]Record, error) {
+	name, tpe, err := parseID(recID)
+
 	if err != nil {
 		return nil, err
-	} else {
-		return client.ListRecordsByNameAndType(zone, name, tpe)
 	}
+
+	return client.ListRecordsByNameAndType(zone, name, tpe)
 }
 
-// Checks if requested record exists in Zone
+// RecordExists Checks if requested record exists in Zone
 func (client *Client) RecordExists(zone string, name string, tpe string) (bool, error) {
 	allRecords, err := client.ListRecords(zone)
 	if err != nil {
@@ -279,20 +293,22 @@ func (client *Client) RecordExists(zone string, name string, tpe string) (bool, 
 			return true, nil
 		}
 	}
+
 	return false, nil
 }
 
-// Checks if requested record exists in Zone by it's ID
-func (client *Client) RecordExistsByID(zone string, recId string) (bool, error) {
-	name, tpe, err := parseId(recId)
+// RecordExistsByID Checks if requested record exists in Zone by it's ID
+func (client *Client) RecordExistsByID(zone string, recID string) (bool, error) {
+	name, tpe, err := parseID(recID)
+
 	if err != nil {
 		return false, err
-	} else {
-		return client.RecordExists(zone, name, tpe)
 	}
+
+	return client.RecordExists(zone, name, tpe)
 }
 
-// Creates new record with single content entry
+// CreateRecord Creates new record with single content entry
 func (client *Client) CreateRecord(zone string, record Record) (string, error) {
 	reqBody, _ := json.Marshal(zonePatchRequest{
 		RecordSets: []ResourceRecordSet{
@@ -310,7 +326,7 @@ func (client *Client) CreateRecord(zone string, record Record) (string, error) {
 		return "", err
 	}
 
-	resp, err := client.Http.Do(req)
+	resp, err := client.http.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -319,16 +335,16 @@ func (client *Client) CreateRecord(zone string, record Record) (string, error) {
 	if resp.StatusCode != 200 && resp.StatusCode != 204 {
 		errorResp := new(errorResponse)
 		if err = json.NewDecoder(resp.Body).Decode(errorResp); err != nil {
-			return "", fmt.Errorf("Error creating record: %s", record.Id())
-		} else {
-			return "", fmt.Errorf("Error creating record: %s, reason: %q", record.Id(), errorResp.ErrorMsg)
+			return "", fmt.Errorf("Error creating record: %s", record.ID())
 		}
-	} else {
-		return record.Id(), nil
+
+		return "", fmt.Errorf("Error creating record: %s, reason: %q", record.ID(), errorResp.ErrorMsg)
 	}
+
+	return record.ID(), nil
 }
 
-// Creates new record set in Zone
+// ReplaceRecordSet Creates new record set in Zone
 func (client *Client) ReplaceRecordSet(zone string, rrSet ResourceRecordSet) (string, error) {
 	rrSet.ChangeType = "REPLACE"
 
@@ -341,7 +357,7 @@ func (client *Client) ReplaceRecordSet(zone string, rrSet ResourceRecordSet) (st
 		return "", err
 	}
 
-	resp, err := client.Http.Do(req)
+	resp, err := client.http.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -350,16 +366,16 @@ func (client *Client) ReplaceRecordSet(zone string, rrSet ResourceRecordSet) (st
 	if resp.StatusCode != 200 && resp.StatusCode != 204 {
 		errorResp := new(errorResponse)
 		if err = json.NewDecoder(resp.Body).Decode(errorResp); err != nil {
-			return "", fmt.Errorf("Error creating record set: %s", rrSet.Id())
-		} else {
-			return "", fmt.Errorf("Error creating record set: %s, reason: %q", rrSet.Id(), errorResp.ErrorMsg)
+			return "", fmt.Errorf("Error creating record set: %s", rrSet.ID())
 		}
-	} else {
-		return rrSet.Id(), nil
+
+		return "", fmt.Errorf("Error creating record set: %s, reason: %q", rrSet.ID(), errorResp.ErrorMsg)
 	}
+
+	return rrSet.ID(), nil
 }
 
-// Deletes record set from Zone
+// DeleteRecordSet Deletes record set from Zone
 func (client *Client) DeleteRecordSet(zone string, name string, tpe string) error {
 	reqBody, _ := json.Marshal(zonePatchRequest{
 		RecordSets: []ResourceRecordSet{
@@ -376,7 +392,7 @@ func (client *Client) DeleteRecordSet(zone string, name string, tpe string) erro
 		return err
 	}
 
-	resp, err := client.Http.Do(req)
+	resp, err := client.http.Do(req)
 	if err != nil {
 		return err
 	}
@@ -386,20 +402,20 @@ func (client *Client) DeleteRecordSet(zone string, name string, tpe string) erro
 		errorResp := new(errorResponse)
 		if err = json.NewDecoder(resp.Body).Decode(errorResp); err != nil {
 			return fmt.Errorf("Error deleting record: %s %s", name, tpe)
-		} else {
-			return fmt.Errorf("Error deleting record: %s %s, reason: %q", name, tpe, errorResp.ErrorMsg)
 		}
-	} else {
-		return nil
+
+		return fmt.Errorf("Error deleting record: %s %s, reason: %q", name, tpe, errorResp.ErrorMsg)
 	}
+
+	return nil
 }
 
-// Deletes record from Zone by it's ID
-func (client *Client) DeleteRecordSetByID(zone string, recId string) error {
-	name, tpe, err := parseId(recId)
+// DeleteRecordSetByID Deletes record from Zone by it's ID
+func (client *Client) DeleteRecordSetByID(zone string, recID string) error {
+	name, tpe, err := parseID(recID)
 	if err != nil {
 		return err
-	} else {
-		return client.DeleteRecordSet(zone, name, tpe)
 	}
+
+	return client.DeleteRecordSet(zone, name, tpe)
 }
