@@ -37,7 +37,7 @@ func NewClient(serverURL string, apiKey string) (*Client, error) {
 	client := Client{
 		serverURL: url.String(),
 		apiKey:    apiKey,
-		Http:      cleanhttp.DefaultClient(),
+		http:      cleanhttp.DefaultClient(),
 	}
 	client.apiVersion, err = client.detectapiVersion()
 	if err != nil {
