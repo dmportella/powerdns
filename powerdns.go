@@ -1,4 +1,4 @@
-package PowerDNS
+package powerdns
 
 // Covered by original license.
 
